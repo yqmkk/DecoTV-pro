@@ -1,164 +1,225 @@
-name: Build & Push Docker Image
+'use client';
 
-on:
-  workflow_dispatch:
-    inputs:
-      tag:
-        description: 'Docker 标签'
-        required: false
-        default: 'latest'
-        type: string
-  push:
-    branches: [main, master]
-  pull_request:
-    branches: [main, master]
+import { useEffect, useState, useMemo } from 'react';
 
-concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
+// ============================================================================
+// Types
+// ============================================================================
 
-permissions:
-  contents: write
-  packages: write
-  actions: write
+interface PlayerLoadingProps {
+  /** 加载提示文字 */
+  message?: string;
+  /** 是否显示 */
+  visible?: boolean;
+  /** 核心优化：传入视频播放地址，用于预解析网络 */
+  videoUrl?: string;
+}
 
-jobs:
-  build:
-    strategy:
-      matrix:
-        include:
-          - platform: linux/amd64
-            os: ubuntu-latest
-          - platform: linux/arm64
-            os: ubuntu-24.04-arm
-    runs-on: ${{ matrix.os }}
+// ============================================================================
+// 子组件 - 视觉部分
+// ============================================================================
 
-    steps:
-      - name: Prepare platform identifier
-        id: platform
-        run: |
-          PLATFORM_ID=$(echo "${{ matrix.platform }}" | sed 's|/|-|g')
-          echo "id=${PLATFORM_ID}" >> $GITHUB_OUTPUT
+/** 呼吸灯 Logo */
+const PulseLogo = () => (
+  <div className='relative flex items-center justify-center'>
+    {/* 外层光晕 - 开启 will-change 优化性能 */}
+    <div className='absolute h-32 w-32 animate-pulse rounded-full bg-red-500/20 blur-xl will-change-opacity' />
+    <div
+      className='absolute h-24 w-24 rounded-full bg-red-500/30 blur-lg will-change-transform'
+      style={{ animation: 'pulse 2s cubic-bezier(0.4, 0, 0.6, 1) infinite' }}
+    />
 
-      - name: Checkout source code
-        uses: actions/checkout@v4
+    {/* Logo 容器 */}
+    <div className='relative z-10 flex h-20 w-20 items-center justify-center rounded-2xl bg-linear-to-br from-red-500 to-red-700 shadow-2xl shadow-red-500/30'>
+      <svg
+        className='ml-1 h-10 w-10 text-white drop-shadow-lg'
+        viewBox='0 0 24 24'
+        fill='currentColor'
+      >
+        <path d='M8 5v14l11-7z' />
+      </svg>
+    </div>
 
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
+    {/* 品牌名称 */}
+    <span className='absolute -bottom-10 text-xl font-bold tracking-wider text-white/90'>
+      Deco<span className='text-red-500'>TV</span>
+    </span>
+  </div>
+);
 
-      - name: Login to GitHub Container Registry
-        uses: docker/login-action@v3
-        with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
+/** 环形进度条 */
+const RingLoader = () => (
+  <div className='absolute inset-0 flex items-center justify-center'>
+    <div className='absolute h-36 w-36 rounded-full border-2 border-white/5' />
 
-      - name: Set lowercase repository owner
-        id: lowercase
-        run: echo "owner=$(echo '${{ github.repository_owner }}' | tr '[:upper:]' '[:lower:]')" >> "$GITHUB_OUTPUT"
+    <svg
+      className='absolute h-36 w-36 -rotate-90 will-change-transform'
+      viewBox='0 0 100 100'
+      style={{ animation: 'spin 2s linear infinite' }}
+    >
+      <circle
+        cx='50'
+        cy='50'
+        r='48'
+        fill='none'
+        stroke='url(#loaderGradient)'
+        strokeWidth='1.5'
+        strokeLinecap='round'
+        strokeDasharray='75 226'
+        className='origin-center'
+      />
+      <defs>
+        <linearGradient id='loaderGradient' x1='0%' y1='0%' x2='100%' y2='0%'>
+          <stop offset='0%' stopColor='#ef4444' stopOpacity='1' />
+          <stop offset='50%' stopColor='#f97316' stopOpacity='0.8' />
+          <stop offset='100%' stopColor='#ef4444' stopOpacity='0' />
+        </linearGradient>
+      </defs>
+    </svg>
+  </div>
+);
 
-      - name: Extract version from package.json
-        id: version
-        run: |
-          VERSION=$(node -p "require('./package.json').version")
-          echo "version=v${VERSION}" >> "$GITHUB_OUTPUT"
-          echo "Detected version: v${VERSION}"
+/** 打字机文字效果 */
+const TypewriterText = ({ text }: { text: string }) => {
+  const [displayText, setDisplayText] = useState('');
+  
+  useEffect(() => {
+    let index = 0;
+    const interval = setInterval(() => {
+      if (index <= text.length) {
+        setDisplayText(text.slice(0, index));
+        index++;
+      } else {
+        setTimeout(() => { index = 0; }, 3000);
+      }
+    }, 80);
+    return () => clearInterval(interval);
+  }, [text]);
 
-      - name: Extract metadata
-        id: meta
-        uses: docker/metadata-action@v4
+  return (
+    <div className='flex items-center justify-center text-sm text-white/60'>
+      <span className='bg-linear-to-r from-white/50 via-white/80 to-white/50 bg-clip-text text-transparent font-medium'>
+        {displayText}
+      </span>
+      <span className='ml-1 inline-block h-4 w-0.5 bg-red-500 animate-[pulse_1s_infinite]' />
+    </div>
+  );
+};
 
-        with:
-          images: ghcr.io/${{ steps.lowercase.outputs.owner }}/decotv
-          tags: |
-            type=raw,value=${{ github.event.inputs.tag || 'latest' }},enable={{is_default_branch}}
-            type=raw,value=${{ steps.version.outputs.version }},enable={{is_default_branch}}
+// ============================================================================
+// 主组件 - 包含网络优化逻辑
+// ============================================================================
 
-      - name: Build and push by digest
-        id: build
-        uses: docker/build-push-action@v4
-        with:
-          context: .
-          file: ./Dockerfile
-          platforms: ${{ matrix.platform }}
-          labels: ${{ steps.meta.outputs.labels }}
-          tags: |
-            ghcr.io/${{ steps.lowercase.outputs.owner }}/decotv:${{ github.event.inputs.tag || 'latest' }}
-            ghcr.io/${{ steps.lowercase.outputs.owner }}/decotv:${{ steps.version.outputs.version }}
-          outputs: type=image,name=ghcr.io/${{ steps.lowercase.outputs.owner }}/decotv,name-canonical=true,push=true
+export default function PlayerLoading({
+  message = '正在解析极速线路...',
+  visible = true,
+  videoUrl = '',
+}: PlayerLoadingProps) {
+  const [mounted, setMounted] = useState(false);
 
-      - name: Export digest
-        run: |
-          mkdir -p /tmp/digests
-          digest="${{ steps.build.outputs.digest }}"
-          touch "/tmp/digests/${digest#sha256:}"
+  // 1. 网络链路预热优化 (Preconnect & DNS Prefetch)
+  useEffect(() => {
+    if (visible && videoUrl) {
+      try {
+        const url = new URL(videoUrl);
+        const domain = url.origin;
 
-      - name: Upload digest
-        uses: actions/upload-artifact@v4
-        with:
-          name: digests-${{ steps.platform.outputs.id }}
-          path: /tmp/digests/*
-          if-no-files-found: error
-          retention-days: 1
+        // 预连接：提前完成 TCP/TLS 握手
+        const preconnect = document.createElement('link');
+        preconnect.rel = 'preconnect';
+        preconnect.href = domain;
+        preconnect.crossOrigin = 'anonymous';
+        document.head.appendChild(preconnect);
 
-  merge:
-    runs-on: ubuntu-latest
-    needs:
-      - build
-    steps:
-      - name: Download digests
-        uses: actions/download-artifact@v4
-        with:
-          path: /tmp/digests
-          pattern: digests-*
-          merge-multiple: true
+        // DNS 预解析
+        const dnsPrefetch = document.createElement('link');
+        dnsPrefetch.rel = 'dns-prefetch';
+        dnsPrefetch.href = domain;
+        document.head.appendChild(dnsPrefetch);
 
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
+        return () => {
+          document.head.removeChild(preconnect);
+          document.head.removeChild(dnsPrefetch);
+        };
+      } catch (e) {
+        console.warn("Invalid video URL for preconnect");
+      }
+    }
+  }, [visible, videoUrl]);
 
-      - name: Login to GitHub Container Registry
-        uses: docker/login-action@v3
-        with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
+  useEffect(() => {
+    setMounted(true);
+  }, []);
 
-      - name: Set lowercase repository owner
-        id: lowercase
-        run: echo "owner=$(echo '${{ github.repository_owner }}' | tr '[:upper:]' '[:lower:]')" >> "$GITHUB_OUTPUT"
+  if (!visible) return null;
 
-      - name: Download package.json
-        uses: actions/checkout@v4
-        with:
-          sparse-checkout: |
-            package.json
-          sparse-checkout-cone-mode: false
+  return (
+    <div
+      className='fixed inset-0 z-[999] flex flex-col items-center justify-center overflow-hidden'
+      style={{
+        background: `
+          radial-gradient(ellipse 80% 50% at 50% 50%, rgba(127, 29, 29, 0.15) 0%, transparent 50%),
+          linear-gradient(to bottom, #0a0a0a 0%, #111111 50%, #0a0a0a 100%)
+        `,
+      }}
+    >
+      {/* 噪点背景层 */}
+      <div className='pointer-events-none absolute inset-0 opacity-[0.03] contrast-150 brightness-150'
+        style={{ backgroundImage: `url("data:image/svg+xml,%3Csvg viewBox='0 0 200 200' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.65' numOctaves='3' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)'/%3E%3C/svg%3E")` }}
+      />
 
-      - name: Extract version from package.json
-        id: version
-        run: |
-          VERSION=$(node -p "require('./package.json').version")
-          echo "version=v${VERSION}" >> "$GITHUB_OUTPUT"
-          echo "Detected version: v${VERSION}"
+      <div
+        className='relative flex flex-col items-center gap-16'
+        style={{
+          opacity: mounted ? 1 : 0,
+          transform: mounted ? 'translateY(0)' : 'translateY(15px)',
+          transition: 'all 0.6s cubic-bezier(0.22, 1, 0.36, 1)',
+        }}
+      >
+        {/* 中心 Logo 区域 */}
+        <div className='relative h-40 w-40'>
+          <RingLoader />
+          <div className='flex h-full w-full items-center justify-center'>
+            <PulseLogo />
+          </div>
+        </div>
 
-      - name: Create manifest list and push
-        working-directory: /tmp/digests
-        run: |
-          docker buildx imagetools create -t ghcr.io/${{ steps.lowercase.outputs.owner }}/decotv:${{ github.event.inputs.tag || 'latest' }} \
-            $(printf 'ghcr.io/${{ steps.lowercase.outputs.owner }}/decotv@sha256:%s ' *)
-          docker buildx imagetools create -t ghcr.io/${{ steps.lowercase.outputs.owner }}/decotv:${{ steps.version.outputs.version }} \
-            $(printf 'ghcr.io/${{ steps.lowercase.outputs.owner }}/decotv@sha256:%s ' *)
+        {/* 文字提示区域 */}
+        <div className='flex flex-col items-center gap-4'>
+          <TypewriterText text={message} />
+          
+          {/* 实时优化进度装饰 */}
+          <div className='flex items-center gap-1.5'>
+             <div className='h-[2px] w-8 rounded-full bg-red-900/30 overflow-hidden'>
+                <div className='h-full w-full bg-red-500 origin-left animate-[loading_2s_infinite]' />
+             </div>
+             <span className='text-[10px] text-white/20 uppercase tracking-[0.2em] font-medium'>
+               Optimizing Link
+             </span>
+             <div className='h-[2px] w-8 rounded-full bg-red-900/30 overflow-hidden'>
+                <div className='h-full w-full bg-red-500 origin-right animate-[loading_2s_infinite]' />
+             </div>
+          </div>
+        </div>
+      </div>
 
-  cleanup-refresh:
-    runs-on: ubuntu-latest
-    needs:
-      - merge
-    if: always()
-    steps:
-      - name: Delete workflow runs
-        uses: Mattraks/delete-workflow-runs@main
-        with:
-          token: ${{ secrets.GITHUB_TOKEN }}
-          repository: ${{ github.repository }}
-          retain_days: 0
-          keep_minimum_runs: 2
+      <style jsx>{`
+        @keyframes spin {
+          from { transform: rotate(0deg); }
+          to { transform: rotate(360deg); }
+        }
+        @keyframes pulse {
+          0%, 100% { opacity: 0.4; transform: scale(1); }
+          50% { opacity: 0.8; transform: scale(1.05); }
+        }
+        @keyframes loading {
+          0% { transform: scaleX(0); opacity: 0; }
+          50% { transform: scaleX(1); opacity: 1; }
+          100% { transform: scaleX(0); opacity: 0; }
+        }
+      `}</style>
+    </div>
+  );
+}
+
+export { PlayerLoading };
